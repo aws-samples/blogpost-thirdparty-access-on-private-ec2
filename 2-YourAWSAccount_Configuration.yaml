@@ -1,0 +1,412 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+---
+AWSTemplateFormatVersion : "2010-09-09"
+Description: >
+  AWS Blog:How to grant least privilege access to third parties on your private
+  EC2 instances with AWS Systems Manager
+
+  Sample CloudFormation template to set up the prerequisites for the
+  main accounts : new VPC, private subnets, VPC Endpoints, SGs,
+  AWS EC2 instance with access via AWS Systems Manager Session Manager.
+  This provides interface VPC endpoints for the following services:
+  * com.amazonaws.<region>.ssm
+  * com.amazonaws.<region>.ssmmessages
+  * com.amazonaws.<region>.ec2messages
+  * com.amazonaws.<region>.logs
+  **WARNING** This template creates [VPC interface endpoints] and related resources.
+  You will be billed for the AWS resources used if you create a stack from this template.
+
+Parameters:
+  ParamProjectName:
+    Type: String
+    Default: "BlogPrivEC2-3P"
+  ParamTagKeyExternal:
+    Type : String
+    Default: "ExternalAccessGrantedTo"
+    Description: "Tag key"
+  ParamTagValueExternalA:
+    Type : String
+    Default: "Third_Party_A"
+    Description: "Tag value"
+  ParamLatestAmiId:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"
+  ParamVPCCidr:
+    Description: Main VPC CIDR Block
+    Type: String
+    AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/(1[6-9]|2[0-8]))$
+    Default: 10.24.34.0/23
+  ParamSubnetACidr:
+    Description: Subnet A CIDR Block
+    Type: String
+    AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/(1[6-9]|2[0-8]))$
+    Default: 10.24.34.0/24
+  ParamSubnetBCidr:
+    Description: Subnet B CIDR Block
+    Type: String
+    AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/(1[6-9]|2[0-8]))$
+    Default: 10.24.35.0/24
+  ParamThirdPartyAccountID:
+    Description: "The Account ID of your third-party - Their account"
+    Type: String
+    Default: "123456789012"
+    AllowedPattern: ^[0-9]{12}$
+
+Resources:
+  # VPC Endpoint for SSM
+  RssSSMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref RssSGVPCEndPoints
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssm"
+      SubnetIds:
+        - !Ref RssEC2SubnetA
+        - !Ref RssEC2SubnetB
+      VpcEndpointType: "Interface"
+      VpcId:
+        Ref: RssMainVPC
+  # VPC Endpoint for SSM messages
+  RssSSMMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref RssSGVPCEndPoints
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssmmessages"
+      SubnetIds:
+        - !Ref RssEC2SubnetA
+        - !Ref RssEC2SubnetB
+      VpcEndpointType: "Interface"
+      VpcId:
+        Ref: RssMainVPC
+  # VPC Endpoint for EC2 meessages
+  RssEC2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref RssSGVPCEndPoints
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ec2messages"
+      SubnetIds:
+        - !Ref RssEC2SubnetA
+        - !Ref RssEC2SubnetB
+      VpcEndpointType: "Interface"
+      VpcId:
+        Ref: RssMainVPC
+  # VPC endpoint for logs to allow streaming to CW
+  RssLogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref RssSGVPCEndPoints
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
+      SubnetIds:
+        - !Ref RssEC2SubnetA
+        - !Ref RssEC2SubnetB
+      VpcEndpointType: "Interface"
+      VpcId:
+        Ref: RssMainVPC
+
+#Create the VPC which will host our EC2 instances. We need 4 IP addresses, 1 for for the EC2 instance and 3 for the VPC Endpoints.
+  RssMainVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref ParamVPCCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: WhatFor
+        Value: !Sub "RssMainVPC to try out - ${ParamProjectName}"
+      - Key: Name
+        Value: !Join ["", [!Ref "AWS::StackName","-RssMainVPC"]]
+  #Let"s enable Flow logs on that VPC
+  RssVPCFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt RssFlowLogRole.Arn
+      LogGroupName: !Ref RssFlowLogsGroup
+      ResourceId: !Ref RssMainVPC
+      ResourceType: VPC
+      TrafficType: ALL
+
+#Our FlowLog needs a role to send logs to CloudWatch
+  RssFlowLogRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - "vpc-flow-logs.amazonaws.com"
+          Action: "sts:AssumeRole"
+      Policies:
+      - PolicyName: "flowlogs-policy"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Action:
+            - "logs:CreateLogGroup"
+            - "logs:CreateLogStream"
+            - "logs:PutLogEvents"
+            - "logs:DescribeLogGroups"
+            - "logs:DescribeLogStreams"
+            Resource: !GetAtt "RssFlowLogsGroup.Arn"
+
+#And now for the VPC FlowLog CloudWatch LogGroup
+  RssFlowLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      #LogGroupName : !Ref ParamVPCFlowLogsGroupName
+      RetentionInDays: 7
+
+#And now for the Session Manager CloudWatch LogGroup
+  RssSSMLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName : "SSMSessionManager_LogGroup"
+      RetentionInDays: 7
+
+#Deploy the subnet A in AZ a
+  RssEC2SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RssMainVPC
+      CidrBlock: !Ref ParamSubnetACidr
+      AvailabilityZone: !Select [ 0, !GetAZs ]  # Get the first AZ in the list
+      Tags:
+      - Key: Project
+        Value: !Ref ParamProjectName
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-EC2Subnet-Priv-A
+
+#Deploy the subnet A in AZ a
+  RssEC2SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RssMainVPC
+      CidrBlock: !Ref ParamSubnetBCidr
+      AvailabilityZone: !Select [ 1, !GetAZs ]  # Get the 2ND AZ in the list
+      Tags:
+      - Key: Project
+        Value: !Ref ParamProjectName
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-EC2Subnet-Priv-B
+
+#Deploy the EC2 instance, attach an Instance Profile that allows the EC2 instance to call SSM
+  RssSSMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com]
+            Action: ["sts:AssumeRole"]
+      Path: /
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::${AWS::Partition}:policy/AmazonSSMManagedInstanceCore
+#EC2 instance to allow management by SSM Session Manager
+  RssSSMInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub SSMInstanceProfile-${AWS::StackName}
+      Path : /
+      Roles: [!Ref RssSSMRole]
+#EC2 instance tagged for A
+  RssEC2Instance1:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      ImageId: !Ref ParamLatestAmiId
+      InstanceType: t2.micro
+      SecurityGroupIds:
+        - !Ref RssSGPrivEC2
+      SubnetId: !Ref RssEC2SubnetA
+      IamInstanceProfile: !Ref RssSSMInstanceProfile
+      Tags:
+      - Key: !Ref ParamTagKeyExternal
+        Value: !Ref ParamTagValueExternalA
+      - Key: Account
+        Value: MainAccount hosting EC2
+      - Key: Name
+        Value: !Sub CF-Linux-PrivA-#1-${AWS::StackName}
+      - Key: Role
+        Value: "EC2 with Linux AMI for demo with System Manager"
+#EC2 instance tagged for B
+  RssEC2Instance2:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      ImageId: !Ref ParamLatestAmiId
+      InstanceType: t2.micro
+      SecurityGroupIds:
+        - !Ref RssSGPrivEC2
+      SubnetId: !Ref RssEC2SubnetB
+      IamInstanceProfile: !Ref RssSSMInstanceProfile
+      Tags:
+      - Key: !Ref ParamTagKeyExternal
+        Value: "Third_Party_B"
+      - Key: Account
+        Value: MainAccount hosting EC2
+      - Key: Name
+        Value: !Sub CF-Linux-PrivA-#2-${AWS::StackName}
+      - Key: Role
+        Value: "EC2 with Linux AMI for demo with System Manager"
+
+#Deploy the Security Group that will initially block communication between EC2 and SSM
+  RssSGVPCEndPoints:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId: !Ref RssMainVPC
+      GroupDescription: VPC Endpoint Security Group
+      Tags:
+        - Key: Name
+          Value: "VPC Endpoints Security Group"
+  # Outbound rule to the SG of the VPC
+  RssSGVPCEndPointsEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description : "SG Outbound - VPCe - Limits non-stateful egress traffic from the instance to the loopback port"
+      GroupId: !Ref RssSGVPCEndPoints
+      IpProtocol: "-1"
+      CidrIp: 127.0.0.1/32
+  #     ToPort: 443
+  #     DestinationSecurityGroupId: !Ref RssSGVPCEndPoints
+  RssSGVPCEndPointsIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description : "SG Inbound - VPCe"
+      GroupId: !Ref RssSGVPCEndPoints
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref RssSGVPCEndPoints
+  RssSGVPCEndPointsEC2Ingress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description : "VPeSG Inbound - EC2"
+      GroupId: !Ref RssSGVPCEndPoints
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref RssSGPrivEC2
+
+#Deploy the Security Group for the private EC2
+  RssSGPrivEC2:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId: !Ref RssMainVPC
+      GroupDescription: Private EC2 Security Group
+      Tags:
+        - Key: Name
+          Value: "Private EC2 Security Group"
+#Outbound rule allowing traffic from the EC2 in 443 to the VPCEndpoint SG
+  RssSGPrivEC2SecurityGroupEgress:
+    Type : AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description : "SG Outbound - PrivEC2"
+      GroupId: !Ref RssSGPrivEC2
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !Ref RssSGVPCEndPoints
+#IAM Managed policy to manage the third party A permissions
+  RssSSMStartSessionPolicyForThirdPartyA:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: "TerminateResumeSession"
+            Effect: "Allow"
+            Action:
+              - ssm:TerminateSession
+              - ssm:ResumeSession
+            Resource: "*"
+            Condition:
+              StringEquals:
+                ssm:resourceTag/aws:ssmmessages:session-id: ["${aws:userid}"]
+          -
+            Sid : "CloudWatchLogGroup"
+            Effect : "Allow"
+            Action :
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:DescribeLogGroups
+              - logs:DescribeLogStreams
+            Resource : !Sub "arn:${AWS::Partition}:logs:${AWS::Region}::${AWS::AccountId}::log-group:SSMSessionManager_LogGroup:*"
+          -
+            Sid: "AllowUsageOfSSMDocument"
+            Effect: "Allow"
+            Action: "ssm:StartSession"
+            Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:document/SSM-SessionManagerRunShell"
+          -
+            Sid : "GenericSSM"
+            Effect: "Allow"
+            Action:
+              - ec2:DescribeInstances
+              - ssm:GetConnectionStatus
+              - ssm:DescribeInstanceProperties
+            Resource : "*"
+          -
+            Sid: "StartSessionOnInstances"
+            Effect: "Allow"
+            Action:
+              - ssm:StartSession
+            Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+            Condition:
+              StringEquals:
+                ssm:resourceTag/ExternalAccessGrantedTo: !Ref ParamTagValueExternalA
+          -
+            Sid : "ForbidAssumingAnotherRoleAndSession"
+            Effect: "Deny"
+            Action:
+              - sts:AssumeRole
+              - ssm:DescribeSessions ############# Will reveal too much info
+            Resource : "*"
+
+#Creation of IAM role in the EC2 Account hosting the EC2 that
+# will be assume by third-parties using cross-account
+  RssRootRole:
+      Type: "AWS::IAM::Role"
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                AWS:
+                  - !Sub "arn:${AWS::Partition}:iam::${ParamThirdPartyAccountID}:role/3P_IAM_Assume_Role"
+              Action:
+                - "sts:AssumeRole"
+              Condition:
+                StringEquals:
+                  sts:ExternalId: "ExternalID3rdPartyA"
+        Path: /
+        ManagedPolicyArns:
+          - !Ref RssSSMStartSessionPolicyForThirdPartyA
+        RoleName: "SSMStartSession_IAM_Role_ThirdPartyA"
+        Description: "Role to provide access to the third party to the local private EC2"
+        Tags:
+        - Key: SSMSessionRunAs
+          Value: "os_user_a_alice"
+        - Key: !Ref ParamTagKeyExternal
+          Value: !Ref ParamTagValueExternalA
+        - Key: Type
+          Value: "IAM Role"
+        - Key: Role
+          Value: "Role to be assume by AnyCompany A - Third-party"
+        - Key: Account
+          Value: "Your Account hosting your private EC2"
+
+Outputs:
+  OutStackName:
+    Description: "Stack name."
+    Value: !Sub "${AWS::StackName}"

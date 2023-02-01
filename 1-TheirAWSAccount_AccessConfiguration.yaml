@@ -1,0 +1,140 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description : >
+  AWS Blog:How to grant least privilege access to third parties on your private
+  EC2 instances with AWS Systems Manager
+
+  Sample CloudFormation - This template should be deployed in the Third Party's
+  AWS Account. In this template the third party is named 'Third_Party_A'.
+  The template will create an IAM user 'alice', an IAM role, a User Group. 
+  The permissions on the User Group allow to switch role to the IAM role created.
+  Permissions will be added on the IAM role to assume role cross-account
+  into your Main Account hosting the private EC2 instance.
+  It is assumed that External ID value has been shared with third party.
+  **WARNING** This template creates a secret in AWS Secrets Manager.
+  You will be billed for the AWS resources used if you create a stack from this template.
+
+Parameters:
+  ParamAccountIDwithEC2:
+    Description: "Your Account ID hosting the private EC2 instances"
+    Type: String
+    Default: "123456789012"
+    AllowedPattern: ^[0-9]{12}$
+  ParamUsernameToSet:
+    Description: "Username to give to the new user"
+    Type: String
+    Default: "alice"
+  Param3PRoleName:
+    Description: "Local Role:The IAM role name of your third-party allows to assume role in your account"
+    Type: String
+    Default: "TheirAccount_LocalSwitch_IAMRole"
+  ParamSerial:
+    Type: Number
+    Description: Increment this to rotate credentials
+    Default: 0
+Resources:
+
+#Create a User Group for "$ParamUsernameToSet" Group, with the permissions to assume the local IAM role
+  RssNewGroupByCF:
+    Type: AWS::IAM::Group
+    Properties:
+      ManagedPolicyArns:
+        - !Ref RssIAMPolicyXAccount2MainACC
+
+#Add one of your user to the Group
+  RssAddUserToGroup:
+    Type: AWS::IAM::UserToGroupAddition
+    Properties:
+      GroupName: !Ref RssNewGroupByCF
+      Users:
+        - !Ref RssNewUserByCF
+
+#Assume role into local account
+  RssIAMPolicyXAccount2MainACC:
+      Type: AWS::IAM::ManagedPolicy
+      Properties:
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          -
+            Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${Param3PRoleName}
+ #Assume role for cross account
+  Rss3PManagedPolicy:
+      Type: AWS::IAM::ManagedPolicy
+      Properties:
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Sid: "AllowAssumeRoleFromTheirAccounttoYourAccount"
+              Effect: "Allow"
+              Action:
+                - sts:AssumeRole
+              Resource: !Sub "arn:${AWS::Partition}:iam::${ParamAccountIDwithEC2}:role/SSMStartSession_IAM_Role_ThirdPartyA"
+              Condition:
+                StringEquals:
+                  sts:ExternalId: "ExternalID3rdPartyA"
+#Create IAM Role : (1) authorizing $ParamUsernameToSet to assume the role
+#(2) assuming role with ExternalID in EC2 Accounts
+  Rss3PIAMRoleAssumeRoleLocally:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: AllowAssumeRoleIntoYourAccount
+              Effect: Allow
+              Principal:
+                AWS:
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:user/${ParamUsernameToSet}
+              Action:
+                - sts:AssumeRole
+        Path: /
+        ManagedPolicyArns:
+          - !Ref Rss3PManagedPolicy
+        RoleName: "3P_IAM_Assume_Role"
+        Description: "Local assume role : 1rst jump - Allow 3P user to switch role locally"
+        Tags:
+        - Key: Type
+          Value: "IAM Role"
+        - Key: Role
+          Value: "Role to be assume by Third_Party_A user locally"
+        - Key: Account
+          Value: "3P Account - Third_Party_A"
+  RssNewUserByCF:
+    Type: AWS::IAM::User
+    Properties: 
+      #ManagedPolicyArns: 
+      #  - !Ref IAMPolicyCrossAccountMainACC
+      Tags:
+        - Key: "IAM User - Not recommended - only for simplicity sake"
+          Value: "alice"
+      UserName: !Ref ParamUsernameToSet 
+  RssNewUserAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties: 
+      Serial: !Ref ParamSerial
+      Status: Active
+      UserName: !Ref RssNewUserByCF
+  RssNewUserAccessKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties: 
+      Description: !Sub "These are the credentials for the IAM User ${RssNewUserByCF}"
+      SecretString: !Join
+        - ""
+        - - '{"AccessKeyId":"'
+          - !Ref RssNewUserAccessKey
+          - '","SecretAccessKey":"'
+          - !GetAtt RssNewUserAccessKey.SecretAccessKey
+          - '"}'
+Outputs:
+  OutStackName:
+    Description: "Stack name."
+    Value: !Sub "${AWS::StackName}"
